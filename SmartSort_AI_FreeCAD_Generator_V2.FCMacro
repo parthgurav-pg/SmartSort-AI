@@ -1,0 +1,330 @@
+# SMARTSORT AI FreeCAD Macro v2.0 - no plugin needed
+"""SmartSort AI prototype v2.0 geometry in millimetres.
+This is a layout/prototype CAD, not a fabrication-approved mechanical drawing.
+Edit the parameters here and regenerate with the accompanying build script.
+Coordinate reference: +X conveyor travel, +Y toward reject bin, +Z upward;
+ground Z=0, example belt surface Z=140 mm.
+"""
+from dataclasses import dataclass, field
+
+TUNNEL_L=300.0
+BELT_W=150.0
+BELT_Z=140.0
+INNER_W=210.0
+TUNNEL_CLEAR_H=200.0
+WALL_T=6.0
+ROOF_T=6.0
+SERVO_ARM_LENGTH=150.0
+SERVO_X=450.0       # servo shaft; tunnel ends at X=300, so 150mm downstream
+IR_ENTRY_X=45.0     # inside inspection chamber, just after entrance curtain
+IR_PRE_SORT_X=410.0 # downstream; 40mm upstream of servo shaft
+BELT_EDGE_LEFT=-BELT_W/2  # -75 mm; keep all sensor hardware at Y<=-80mm
+
+@dataclass
+class Part:
+    name: str
+    group: str
+    color: tuple
+    role: str = ''
+    material: str = ''
+    ops: list = field(default_factory=list)
+    transparency: int = 0
+    def box(self, a, b, cut=False):
+        self.ops.append(('cut_box' if cut else 'box',tuple(a),tuple(b)))
+        return self
+    def cyl(self, r, l, base, axis='z', cut=False):
+        self.ops.append(('cut_cyl' if cut else 'cyl',float(r),float(l),tuple(base),axis))
+        return self
+    def slot(self, x1, x2, z, r, ybase, depth): # slot through y
+        if abs(x2-x1)>0.001:
+            self.box((min(x1,x2),ybase,z-r),(max(x1,x2),ybase+depth,z+r),True)
+        self.cyl(r,depth,(x1,ybase,z),'y',True)
+        self.cyl(r,depth,(x2,ybase,z),'y',True)
+        return self
+
+PARTS=[]
+C = {
+ 'tunnel':(0.33,0.55,0.78), 'frame':(0.18,0.23,0.30),
+ 'bracket':(0.66,0.71,0.75), 'curtain':(0.42,0.79,0.84),
+ 'pcb':(0.07,0.43,0.33), 'lens':(0.11,0.14,0.18),
+ 'cabinet':(0.93,0.95,0.97), 'panel':(0.75,0.82,0.85),
+ 'elec':(0.16,0.46,0.27), 'hub':(0.23,0.29,0.37), 'buck':(0.18,0.53,0.42),
+ 'servo':(0.15,0.17,0.23), 'arm':(0.96,0.52,0.15),
+ 'belt':(0.35,0.39,0.43),'bin':(0.29,0.55,0.73),
+ 'foot':(0.18,0.23,0.30),'light':(0.99,0.87,0.36),
+ 'sample':(0.95,0.69,0.27)
+}
+def part(name,group,color,role='',material='',opacity=0):
+    p=Part(name,group,C[color],role,material,transparency=opacity)
+    PARTS.append(p)
+    return p
+
+# Metal or printed inspection panels: U shaped with two open ends along X.
+for s,name in [(-1,'LEFT'),(1,'RIGHT')]:
+    inner=s*105
+    yo=(-111,-105) if s<0 else (105,111)
+    p=part('Tunnel side wall '+name,'01 - Inspection tunnel','tunnel','Removable opaque wall; camera mounting and cable feedthrough','3D print/6mm sheet')
+    p.box((0,yo[0],149),(300,yo[1],340))
+    # Three pairs of slotted screw holes around side camera and sensor mounts.
+    for x in (128,202):
+        p.slot(x-2,x+2,178,2.1,yo[0]-1,8)
+    # Only entry sensor is wall-mounted. The pre-sort sensor is mounted
+    # on an external extension rail beyond X=300, not the tunnel wall.
+    if s<0:
+        x=IR_ENTRY_X
+        for z in (174,193): p.slot(x,x,z,2.2,yo[0]-1,8)
+    # Main side-camera pass-through; entry sensor has a smaller cable opening.
+    p.box((206,yo[0]-1,174),(219,yo[1]+1,184),True)
+    if s<0:
+        p.box((54,yo[0]-1,183),(64,yo[1]+1,191),True)
+
+p=part('Tunnel overhead roof','01 - Inspection tunnel','tunnel','Sealed top, removable fasteners for camera and LED','3D print/6mm sheet')
+p.box((0,-111,340),(300,111,346))
+for x in (122,194):
+    for y in (-10,10): p.cyl(2.1,8,(x,y,339),'z',True)
+for x,y in [(206,0),(240,0)]: p.cyl(6,8,(x,y,339),'z',True)
+# optional LED strip and diffuser on roof inside.
+p=part('Diffuse LED lighting bar - conceptual','04 - Lighting & sensors','light','Cross-belt illumination; diffuser and driver not specified','LED module TBD')
+p.box((231,-93,332),(245,93,339))
+
+# Four floor-support posts and removable feet; four corner pairs.
+for ix,x in enumerate((35,275),1):
+ for iy,ys in enumerate((-129,129),1):
+    label=f'{ix}-{iy}'
+    p=part('2020 upright '+label,'02 - Four-leg support','frame','20x20 aluminum profile; floor to roof with adjustment at foot','2020 extrusion')
+    p.box((x-10,ys-10,8),(x+10,ys+10,346))
+    # foot, M5 mounting holes for bench fixings
+    p=part('Base foot '+label,'02 - Four-leg support','foot','Bench/floor bolt-down option','Aluminum or print')
+    p.box((x-21,ys-21,0),(x+21,ys+21,8))
+    for dx in (-13,13): p.cyl(2.8,10,(x+dx,ys, -1),'z',True)
+    p=part('Panel-to-upright tie '+label,'02 - Four-leg support','bracket','Connects wall to extrusion with bolts','Sheet metal')
+    y1,y2=(-119,-105) if ys<0 else (105,119)
+    p.box((x-12,y1,298),(x+12,y2,304))
+
+# Exit/entrance PVC lamella curtains (flexible in reality; CAD only static sheets).
+for end_x,ename in [(9,'INLET'),(289,'OUTLET')]:
+    p=part('Curtain header '+ename,'03 - Dust curtains','frame','Screwed holder for flexible strips','Aluminum channel')
+    p.box((end_x-4,-104,330),(end_x+8,104,340))
+    for i in range(5):
+        y0=-103+i*41.2
+        p=part('PVC strip '+ename+' '+str(i+1),'03 - Dust curtains','curtain','Flexible lamella, length trim after item-height test','Flexible transparent PVC',65)
+        p.box((end_x,y0,153),(end_x+1.5,y0+40,330))
+
+# 3 Arducam UB0238 62 x 9 mm board envelopes (vendor says 62mm; PDF shows 60mm).
+p=part('Adjustable TOP camera mount','04 - Lighting & sensors','bracket','75 x 28 plate, 2x2 mounting holes; camera below, faces down','3D print')
+p.box((119,-14,334),(199,14,338))
+for x in (122,194):
+ for y in (-10,10): p.cyl(2.1,5,(x,y,333),'z',True)
+p=part('TOP Arducam UB0238 PCB envelope','04 - Lighting & sensors','pcb','62x9 PCB nominal; center lens x~148; check actual camera','Purchased PCB')
+p.box((128,-4.5,328),(190,4.5,330))
+p=part('TOP camera optics','04 - Lighting & sensors','lens','Lens looking vertically down at belt','Purchased lens')
+p.cyl(3.5,7,(149,0,321),'z')
+# Side camera supports directly on walls, looking across belt and overlapping FOV.
+for side in (-1,1):
+ n='LEFT' if side<0 else 'RIGHT'
+ plate_y=(-104,-99) if side<0 else (99,104)
+ p=part(n+' side camera adjustable bracket','04 - Lighting & sensors','bracket','80x25 plate with fixing clearance; use shims for tilt','3D print')
+ p.box((121,plate_y[0],164),(205,plate_y[1],190))
+ for x in (128,202): p.slot(x-2,x+2,178,2.1,plate_y[0]-1,7)
+ # directly inside bracket
+ board_y=(-98,-96) if side<0 else (96,98)
+ p=part(n+' Arducam UB0238 PCB envelope','04 - Lighting & sensors','pcb','62x9mm; camera faces inward','Purchased PCB')
+ p.box((127,board_y[0],170),(189,board_y[1],179))
+ lens_base=(-96 if side<0 else 90)
+ p=part(n+' camera lens','04 - Lighting & sensors','lens','Horizontal line of sight y toward object','Purchased lens')
+ p.cyl(3.4,6,(148,lens_base,174.5),'y')
+
+# IR modules are reflective types with both the LED and detector on one PCB.
+# Their physical brackets remain entirely OUTSIDE the 150mm belt envelope
+# Y=-75..+75. The optical face is ~6mm clear of the belt edge (Y=-81).
+# Critical: a reflective sensor at Y=-81 cannot be assumed to detect
+# objects at belt center: sensing range must be tested or type changed.
+# (1) Entry sensor at X=45, INSIDE the chamber, after inlet curtain at X=9.
+# (2) Pre-sort sensor at X=410, OUTSIDE tunnel, 40mm before servo X=450.
+# Second sensor gets its own outer support rail, no floating components.
+p=part('Downstream external sensor mounting rail','04 - Lighting & sensors','frame',
+       'Sensor 2 attached to left-side 2020 rail; ends before reject servo; no belt overlap',
+       '2020 extrusion')
+p.box((280,-143,169),(434,-123,199))
+# stiff connecting plates to downstream left upright, away from belt
+p=part('External sensor rail to rear upright clamp','04 - Lighting & sensors','bracket',
+       'Clamps rail to chamber rear corner frame; connection detail provisional', 'Metal angle')
+p.box((267,-143,180),(288,-118,186))
+for idx,(x,label,y0) in enumerate([
+    (IR_ENTRY_X,'entry detection - INSIDE chamber',-109),
+    (IR_PRE_SORT_X,'pre-sort detection - OUTSIDE chamber',-141)],1):
+    # Vertical leg secured to tunnel wall (1) or 2020 rail (2).
+    # The shortened sensor support ends at -89, 14mm OUTSIDE belt edge.
+    p=part('IR '+str(idx)+' '+label+' SHORT bracket','04 - Lighting & sensors','bracket',
+           'L-shaped shortened mount: all geometry Y<=-89; belt begins Y=-75; M4 slots', '3D print')
+    p.box((x-13,y0,165),(x+15,-89,169))
+    p.box((x-13,y0-2,165),(x+15,y0+2,198))
+    for z in (174,193): p.cyl(2.2,6,(x,y0-3,z),'y',True)
+    p=part('IR '+str(idx)+' '+label+' PCB','04 - Lighting & sensors','pcb',
+           'Waveshare reflective IR approx 25x15.9; 6mm gap to belt at optical end','Purchased module')
+    p.box((x-11,-88,170),(x+14,-86,185.9))
+    p=part('IR '+str(idx)+' '+label+' optical face','04 - Lighting & sensors','lens',
+           'Reflective detector faces inward, but reach to belt center is NOT verified', 'Purchased module')
+    p.cyl(3.2,5,(x,-86,178),'y')  # protrudes to Y=-81, edge is -75
+
+# Servo rejector downstream: axis is 150mm after end of tunnel (x=300).
+# Long 2020 cantilever rail remains OUTSIDE belt; requires load test.
+p=part('Extended servo side rail 2020','05 - Reject servo & arm','frame',
+       'Extends from chamber rear leg (x275) to servo (x450); side mounted outside belt', '2020 extrusion')
+p.box((275,-143,90),(482,-123,110))
+p=part('Servo rail to rear-post mounting block','05 - Reject servo & arm','bracket',
+       'Provisional double-fastener connection for cantilever extension','Aluminium angle')
+p.box((266,-144,88),(294,-118,115))
+p=part('Servo shelf riser on rail','05 - Reject servo & arm','bracket',
+       'Mounting spacer transfers force to outer 2020 rail','Metal or print')
+p.box((421,-140,110),(447,-123,112))
+p=part('Servo bracket horizontal shelf','05 - Reject servo & arm','bracket',
+       'MG996R shelf at X450 downstream; mount and arm sweep must be test-fit','3D print')
+p.box((420,-142,112),(481,-89,117))
+for x in (429,471):
+ for y in (-134,-96): p.cyl(2.1,7,(x,y,111),'z',True)
+p=part('MG996R servo body approx 40.3x20x36.6','05 - Reject servo & arm','servo',
+       'Servo shaft center X=450; physical envelope; drawings are reference','Purchased servo')
+p.box((430,-117,117),(470.3,-97,153.6))
+p=part('MG996R pair of mounting ears','05 - Reject servo & arm','servo',
+       'Mounting flange total X dimension ~53.6mm','Purchased servo')
+p.box((423.2,-117,136),(476.8,-97,140))
+for x in (425.5,474.5): p.cyl(1.5,6,(x,-107,135),'z',True)
+p=part('MG996R output shaft axis','05 - Reject servo & arm','bracket',
+       'Pivot exactly 150mm after tunnel end X=300','Purchased servo')
+p.cyl(3.2,7,(SERVO_X,-107,153.6),'z')
+p=part('Servo 150mm reject paddle - stowed','05 - Reject servo & arm','arm',
+       'Length 150mm; stowed along +X; sweep crosses belt when actuated; clear travel with simulation',
+       '3D print or aluminum')
+p.box((SERVO_X,-111,161),(SERVO_X+SERVO_ARM_LENGTH,-103,166))
+p.cyl(5.3,5,(SERVO_X,-107,161),'z')
+# Translate downstream reject bin and chute +95mm, tracking new servo location.
+p=part('Reject side chute - sloping guide conceptual','06 - Collection bin','bin',
+       'Optional guiding lip; verify clearance during paddle rotation','Sheet metal')
+p.box((425,83,109),(580,97,114))
+for name,x0,x1,y0,y1,z0,z1 in [
+ ('Floor',467,627,118,255,0,5),('Front wall',467,472,118,255,5,110),
+ ('Rear wall',622,627,118,255,5,110),('Near wall',472,622,118,123,5,110),
+ ('Far wall',472,622,250,255,5,110)]:
+ part('Collection box '+name,'06 - Collection bin','bin',
+      'Removable rejected-parts bin; shifted downstream with servo','Prototype bin').box((x0,y0,z0),(x1,y1,z1))
+
+# Side electronics box. Sits under belt surface, outside conveyor side clearance.
+# Outer dimensions X=276, Y=153, Z=125 mm.
+for name,lo,hi in [
+ ('Bottom',(24,-294,8),(300,-141,11)),
+ ('Roof',(24,-294,130),(300,-141,133)),
+ ('Left side',(24,-294,11),(27,-141,130)),
+ ('Right side',(297,-294,11),(300,-141,130)),
+ ('Rear mounting wall',(27,-144,11),(297,-141,130))]:
+ p=part('Electronics enclosure '+name,'07 - Electronics enclosure','cabinet','276x153x125 outside; 3mm nominal walls','Sheet/3D print')
+ p.box(lo,hi)
+ if name=='Left side':
+  for i in range(5):
+   p.box((23,-255+i*13,50),(28,-249+i*13,94),True)
+ if name=='Right side':
+  for i in range(5):
+   p.box((296,-255+i*13,50),(301,-249+i*13,94),True)
+ if name=='Rear mounting wall':
+  for x,z in ((80,42),(250,42),(80,116),(250,116)):
+   p.cyl(2.0,6,(x,-146,z),'y',True)
+  # cable grommet/pass-through on high rear wall (Y direction)
+  p.cyl(7,6,(278,-146,84),'y',True)
+
+p=part('Removable control enclosure front panel','07 - Electronics enclosure','panel','Separate cover, bolt holes; 4 push buttons + E-stop cutout need confirm','Sheet metal')
+p.box((27,-294,11),(297,-291,130))
+for x,z in ((36,19),(288,19),(36,122),(288,122)):
+ p.cyl(2.1,5,(x,-295,z),'y',True)
+for x in (75,111,147,183): p.cyl(6,5,(x,-295,106),'y',True)
+p.cyl(11.25,5,(263,-295,106),'y',True)
+# Internal mounting plate for perfboard and electronics as one design placeholder.
+p=part('Internal perfboard / universal mounting backplate','08 - Control modules','panel','234x98 universal plate with M3 slots; check final proto PCB size','Prototyping board')
+p.box((42,-155,22),(290,-152,120))
+for x in range(55,281,20):
+ for z in (32,56,80,104):
+  p.cyl(1.8,5,(x,-156,z),'y',True)
+# component envelopes on front face of the perfboard, Y more negative is forward.
+p=part('Arduino UNO Q 68.58x53.34 envelope','08 - Control modules','elec','Arduino UNO Q official drawing; mounting holes abstracted to perfboard','Purchased board')
+p.box((47,-161,52),(115.58,-156,105.34))
+p=part('Waveshare USB 3.2 hub clearance block','08 - Control modules','hub','88x37x24 reserved; verify actual product enclosure dims','Purchased hub placeholder')
+p.box((129,-179,77),(217,-156,114))
+for j,x in enumerate((133,218),1):
+ p=part('XL4015 buck module '+str(j)+' envelope','08 - Control modules','buck','Approx 62x32x14 each; confirm actual vendor SKU, cooling','Purchased buck placeholder')
+ p.box((x,-170,26),(x+62,-156,58))
+# Electronics box stand-offs attach near lower crossbar (no belt interference).
+for x in (65,260):
+ p=part('Electronics cabinet hanger at X'+str(x),'07 - Electronics enclosure','bracket','M4 strap clamp on left upright rail; prototype fastening','Metal angle')
+ p.box((x-8,-147,115),(x+8,-131,122))
+
+# Visual/test parts only - not included in SmartSort fabrication hardware.
+p=part('REFERENCE conveyor belt surface - 150mm','00 - Reference only','belt','Conveyor shown for scale, not part of SmartSort build','Reference only',58)
+p.box((-90,-75,137),(710,75,140))
+for y in (-90,90):
+ p=part('REFERENCE conveyor side frame '+('L' if y<0 else 'R'),'00 - Reference only','belt','Reference geometry, not supplied with SmartSort','Reference only',55)
+ p.box((-90,y-7,115),(710,y+7,136))
+p=part('REFERENCE inspection sample 40mm cube','00 - Reference only','sample','Small object at x=145 moving right; FOV calibration example','Reference only',12)
+p.box((125,-20,140),(165,20,180))
+
+GROUPS=[
+ '00 - Reference only','01 - Inspection tunnel','02 - Four-leg support',
+ '03 - Dust curtains','04 - Lighting & sensors','05 - Reject servo & arm',
+ '06 - Collection bin','07 - Electronics enclosure','08 - Control modules']
+
+# --------------------- FREECAD ASSEMBLY EXPORT -------------------------------
+# Run this .FCMacro in FreeCAD: Macro > Macros > select file > Execute.
+# The resulting document has separate editable Part::Feature solids, groups,
+# colors, and dimensional notes. Save through the prompted dialog.
+import os
+import FreeCAD as App
+import Part as FCPart
+from FreeCAD import Vector
+
+old=App.ActiveDocument
+if old and old.Name=="SmartSort_AI_Prototype":
+    App.closeDocument(old.Name)
+doc=App.newDocument("SmartSort_AI_Prototype")
+folders={}
+for gn in GROUPS:
+    gr=doc.addObject('App::DocumentObjectGroup','Group_'+gn.split(' - ')[0])
+    gr.Label=gn
+    folders[gn]=gr
+
+def make_feature(s):
+    shape=None
+    for op in s.ops:
+        typ=op[0]
+        if typ in ('box','cut_box'):
+            a,b=op[1:3]
+            obj=FCPart.makeBox(b[0]-a[0],b[1]-a[1],b[2]-a[2],Vector(*a))
+        else:
+            _,r,h,base,axis=op
+            obj=FCPart.makeCylinder(r,h,Vector(*base),{'x':Vector(1,0,0),'y':Vector(0,1,0),'z':Vector(0,0,1)}[axis])
+        if typ.startswith('cut_'):
+            if shape is not None: shape=shape.cut(obj)
+        elif shape is None: shape=obj
+        else: shape=shape.fuse(obj)
+    return shape
+
+for i,s in enumerate(PARTS):
+    f=doc.addObject('Part::Feature', 'S'+str(i+1).zfill(3))
+    f.Label=s.name
+    f.Shape=make_feature(s)
+    f.addProperty('App::PropertyString','Function','SmartSort');f.Function=s.role
+    f.addProperty('App::PropertyString','MaterialNote','SmartSort');f.MaterialNote=s.material
+    f.addProperty('App::PropertyString','AssemblyGroup','SmartSort');f.AssemblyGroup=s.group
+    f.ViewObject.ShapeColor=s.color
+    f.ViewObject.DisplayMode='Flat Lines'
+    f.ViewObject.Transparency=s.transparency
+    folders[s.group].addObject(f)
+
+doc.recompute()
+if App.GuiUp:
+    import FreeCADGui as Gui
+    Gui.activeDocument().activeView().viewAxonometric()
+    Gui.activeDocument().activeView().fitAll()
+output_dir=os.path.join(os.path.expanduser('~'),'Documents')
+os.makedirs(output_dir,exist_ok=True)
+output_file=os.path.join(output_dir,'SmartSort_AI_Prototype_v2.FCStd')
+doc.saveAs(output_file)
+print('FreeCAD file written to:',output_file)
+print('SmartSort: ',len(PARTS),'separate components created. Review the model and save the document.')
